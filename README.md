@@ -106,8 +106,13 @@ console.log(html);
 
 To build and test mhtml2html:
 
+Make sure to set your environment variable `NODE_OPTIONS` to `--openssl-legacy-provider`.
+
 1. If `node_modules` haven't been installed already, run `yarn install` from the root directory.
-2. Run `yarn test` to build and test the source code.
+2. Run `yarn build` to build the source code. 
+3. Run `yarn test` to build and test the source code.
+
+Run the code with `node index.js <params>`
 
 ## License
 

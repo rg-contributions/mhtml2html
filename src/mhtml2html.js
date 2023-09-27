@@ -104,12 +104,12 @@ const mhtml2html = {
      * Parse
      *
      * Description: Returns an object representing the mhtml and its resources.
-     * @param {mhtml} // The mhtml string.
+     * @param {mhtml_p} // The mhtml string.
      * @param {options.htmlOnly} // A flag to determine which parsed object to return.
      * @param {options.parseDOM} // The callback to parse an HTML string.
      * @returns an html document without resources if htmlOnly === true; an MHTML parsed object otherwise.
      */
-    parse: (mhtml, { htmlOnly = false, parseDOM  = defaultDOMParser } = {}) => {
+    parse: (mhtml_p, { htmlOnly = false, parseDOM  = defaultDOMParser } = {}) => {
         const MHTML_FSM = {
             MHTML_HEADERS : 0,
             MTHML_CONTENT : 1,
@@ -117,11 +117,13 @@ const mhtml2html = {
             MHTML_END     : 3
         };
 
+        let mhtml;
         let asset, headers, content, media, frames;  // Record-keeping.
         let location, encoding, type, id;            // Content properties.
         let state, key, next, index, i, l;           // States.
         let boundary;                                // Boundaries.
 
+        mhtml = mhtml_p.replace("\r\nThis is a multi-part message in MIME format.", ""); // fix for IE-made documents
         headers = { };
         content = { };
         media   = { };
@@ -175,6 +177,7 @@ const mhtml2html = {
                 // Fetch document headers including the boundary to use.
                 case MHTML_FSM.MHTML_HEADERS: {
                     next = getLine();
+                    
                     // Use a new line or null character to determine when we should
                     // stop processing headers.
                     if (next != 0 && next != '\n') {
@@ -215,7 +218,7 @@ const mhtml2html = {
                         // Assume the first boundary to be the document.
                         if (typeof index === 'undefined') {
                             index = location;
-                            assert(typeof index !== 'undefined' && type === "text/html", `Index not found; Line ${l}`);
+                            assert(typeof index !== 'undefined' && type.startsWith("text/html"), `Index not found; Line ${l}`);
                         }
 
                         // Ensure the extracted information exists.
@@ -309,7 +312,7 @@ const mhtml2html = {
         assert(typeof frames === "object", 'MHTML error: invalid frames');
         assert(typeof media  === "object", 'MHTML error: invalid media' );
         assert(typeof index  === "string", 'MHTML error: invalid index' );
-        assert(media[index] && media[index].type === "text/html", 'MHTML error: invalid index');
+        assert(media[index] && media[index].type.startsWith("text/html"), 'MHTML error: invalid index');
 
         const dom = parseDOM(media[index].data);
         const documentElem = dom.window.document;

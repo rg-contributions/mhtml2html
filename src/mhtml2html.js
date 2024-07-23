@@ -172,6 +172,16 @@ const mhtml2html = {
             }
         }
 
+        // Returns ArrayBuffer for provided string.
+        function str2ab(str) {
+            var buf = new ArrayBuffer(str.length * 1); // 1 byte(s) for each char
+            var bufView = new Uint8Array(buf);
+            for (var i = 0, strLen = str.length; i < strLen; i++) {
+                bufView[i] = str.charCodeAt(i);
+            }
+            return buf;
+        }
+
         while (state != MHTML_FSM.MHTML_END) {
             switch(state) {
                 // Fetch document headers including the boundary to use.
@@ -264,6 +274,11 @@ const mhtml2html = {
                     try {
                         // Decode unicode.
                         asset.data = decodeURIComponent(escape(asset.data));
+                        try {
+                            // Decode chosen ansi charset if not unicode.
+                            asset.data = (new TextDecoder("windows-1251")).decode(str2ab(asset.data));
+                            asset.data = decodeURIComponent(escape(asset.data));
+                        } catch (e) { e; }
                     } catch (e) { e; }
 
                     // Ignore assets if 'htmlOnly' is set.

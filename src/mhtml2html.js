@@ -54,6 +54,16 @@ function absoluteURL(base, relative) {
     return stack.join('/');
 }
 
+// Converts a string to an ArrayBuffer.
+function stringToArrayBuffer(str) {
+    const buf = new ArrayBuffer(str.length);
+    const bufView = new Uint8Array(buf);
+    for (let i = 0, strLen = str.length; i < strLen; i++) {
+        bufView[i] = str.charCodeAt(i);
+    }
+    return buf;
+}
+
 // Replace asset references with the corresponding data.
 function replaceReferences(media, base, asset) {
     const CSS_URL_RULE = 'url(';
@@ -261,10 +271,87 @@ const mhtml2html = {
                         next = getLine(encoding);
                     }
 
+                    let decodedData = asset.data; // Store original data for fallback
                     try {
-                        // Decode unicode.
+                        // Try decoding as UTF-8 first (implicit in escape/decodeURIComponent)
                         asset.data = decodeURIComponent(escape(asset.data));
-                    } catch (e) { e; }
+                    } catch (e) {
+                        console.warn(
+                            `Initial decoding failed for asset (Type: ${asset.type}, ID: ${asset.id}, Location: ${location}). ` +
+                            `Attempting fallback. Error: ${e.message}`
+                        );
+                        let charset = null;        // Declare variables in the outer catch scope
+                        let charsetSource = null;
+                        try {
+                            // 1. Try extracting charset from the part's Content-Type header
+                            const partContentType = asset.type || '';
+                            const partCharsetMatch = partContentType.match(/charset=([^;]+)/i);
+                            if (partCharsetMatch) {
+                                charset = partCharsetMatch[1].trim();
+                                charsetSource = 'part header';
+                            }
+
+                            // 2. If not found in part, try extracting from the main MHTML document's Content-Type header
+                            if (!charset && headers['Content-Type']) {
+                                const mainContentType = headers['Content-Type'] || '';
+                                const mainCharsetMatch = mainContentType.match(/charset=([^;]+)/i);
+                                if (mainCharsetMatch) {
+                                    charset = mainCharsetMatch[1].trim();
+                                    charsetSource = 'main header';
+                                }
+                            }
+
+                            // 3. If still no charset AND this is the main HTML document, try finding a meta tag
+                            if (!charset && location === index) {
+                                console.log('No charset in headers, attempting to find meta tag in main HTML.');
+                                // Regex for <meta charset="...">
+                                const metaCharsetRegex = /<meta\s+.*?charset\s*=\s*["']?([^"'>\s]+)/i;
+                                // Regex for <meta http-equiv="Content-Type" content="...; charset=...">
+                                const metaHttpEquivRegex = new RegExp(
+                                    '<meta\\s+http-equiv\\s*=\\s*["\']?Content-Type["\']?\\s+' +
+                                    'content\\s*=\\s*["\']?[^"\'>]+;\\s*charset=([^"\'>\\s]+)', 'i'
+                                );
+
+                                let metaMatch = decodedData.match(metaCharsetRegex) || decodedData.match(metaHttpEquivRegex);
+
+                                if (metaMatch && metaMatch[1]) {
+                                    charset = metaMatch[1].trim();
+                                    charsetSource = 'meta tag';
+                                    console.log(`Found charset '${charset}' in meta tag.`);
+                                } else {
+                                    console.log('No charset meta tag found in main HTML.');
+                                }
+                            }
+
+                            // 4. Attempt decoding if a charset was found (from any source) and TextDecoder is available
+                            if (charset && typeof TextDecoder !== 'undefined') {
+                                console.log(`Attempting decoding with charset '${charset}' from ${charsetSource}.`);
+                                const decoder = new TextDecoder(charset, { fatal: true }); // fatal: true throws on error
+                                const buffer = stringToArrayBuffer(decodedData); // Use original data
+                                asset.data = decoder.decode(buffer);
+                                console.log(`Successfully decoded with charset: ${charset}`);
+                            } else if (charset) {
+                                // Charset found, but TextDecoder unavailable
+                                console.warn(
+                                    `TextDecoder API not available, cannot decode with charset '${charset}' from ${charsetSource}.`
+                                );
+                                asset.data = decodedData; // Revert to original data
+                            } else {
+                                // No charset found from any source (part header, main header, or meta tag)
+                                console.warn(
+                                    'No charset specified in headers or meta tag, cannot apply fallback decoding.'
+                                );
+                                asset.data = decodedData; // Revert to original data
+                            }
+                        } catch (fallbackError) {
+                            // Now charset and charsetSource are accessible here
+                            console.error(
+                                `Fallback decoding failed for asset (Type: ${asset.type}, ID: ${asset.id}, Loc: ${location}). ` +
+                                `Charset: ${charset} (from ${charsetSource}). Error: ${fallbackError.message}`
+                            );
+                            asset.data = decodedData; // Revert to original data on fallback failure
+                        }
+                    }
 
                     // Ignore assets if 'htmlOnly' is set.
                     if (htmlOnly === true && typeof index !== 'undefined') {

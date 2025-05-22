@@ -194,7 +194,7 @@ const mhtml2html = {
                         splitHeaders(next, headers);
                     } else {
                         assert(typeof headers['Content-Type'] !== 'undefined', `Missing document content type; Line ${l}`);
-                        const matches = headers['Content-Type'].match(/boundary=(.*)/m);
+const matches = headers['Content-Type'].match(/boundary=([^;]+)/m);
 
                         // Ensure the extracted boundary exists.
                         assert(matches != null, `Missing boundary from document headers; Line ${l}`);
@@ -203,10 +203,9 @@ const mhtml2html = {
                         trim();
                         next = getLine();
 
-                        // Expect the next boundary to appear.
-                        assert(next.includes(boundary), `Expected boundary; Line ${l}`);
-                        content = { };
-                        state = MHTML_FSM.MTHML_CONTENT;
+assert(next.trim().includes(boundary), `Expected boundary; Line ${l}`);
+content = { };
+state = MHTML_FSM.MTHML_CONTENT;
                     }
                     break;
                 }
@@ -287,8 +286,8 @@ const mhtml2html = {
                             const partContentType = asset.type || '';
                             const partCharsetMatch = partContentType.match(/charset=([^;]+)/i);
                             if (partCharsetMatch) {
-                                charset = partCharsetMatch[1].trim();
-                                charsetSource = 'part header';
+                            charset = partCharsetMatch[1].trim().replace(/"/g, '');
+                            charsetSource = 'part header';
                             }
 
                             // 2. If not found in part, try extracting from the main MHTML document's Content-Type header
@@ -401,93 +400,107 @@ const mhtml2html = {
         assert(typeof index  === "string", 'MHTML error: invalid index' );
         assert(media[index] && media[index].type.startsWith("text/html"), 'MHTML error: invalid index');
 
-        const dom = parseDOM(media[index].data);
-        const documentElem = dom.window.document;
-        const nodes = [ documentElem ];
+const dom = parseDOM(media[index].data);
+const documentElem = dom.window.document;
 
-        // Merge resources into the document.
-        while (nodes.length) {
-            const childNode = nodes.shift();
+// Force UTF-8 charset in meta tag
+const metaCharset = documentElem.querySelector('meta[charset]');
+if (metaCharset) {
+    metaCharset.setAttribute('charset', 'UTF-8');
+} else {
+    const head = documentElem.querySelector('head');
+    if (head) {
+        const meta = documentElem.createElement('meta');
+        meta.setAttribute('charset', 'UTF-8');
+        head.insertBefore(meta, head.firstChild);
+    }
+}
 
-            // Resolve each node.
-            childNode.childNodes.forEach(function(child) {
-                if (child.getAttribute) {
-                    href = child.getAttribute('href');
-                    src  = child.getAttribute('src');
-                }
-                if (child.removeAttribute) {
-                    child.removeAttribute('integrity');
-                }
-                switch(child.tagName) {
-                    case 'HEAD':
-                        // Link targets should be directed to the outer frame.
-                        base = documentElem.createElement("base");
-                        base.setAttribute("target", "_parent");
-                        child.insertBefore(base, child.firstChild);
-                        break;
+const nodes = [ documentElem ];
 
-                    case 'LINK':
-                        if (typeof media[href] !== 'undefined' && media[href].type === 'text/css') {
-                            // Embed the css into the document.
-                            style = documentElem.createElement('style');
-                            style.type = 'text/css';
-                            media[href].data = replaceReferences(media, href, media[href].data);
-                            style.appendChild(documentElem.createTextNode(media[href].data));
-                            childNode.replaceChild(style, child);
-                        }
-                        break;
+// Merge resources into the document.
+while (nodes.length) {
+    const childNode = nodes.shift();
 
-                    case 'STYLE':
-                        style = documentElem.createElement('style');
-                        style.type = 'text/css';
-                        style.appendChild(documentElem.createTextNode(replaceReferences(media, index, child.innerHTML)));
-                        childNode.replaceChild(style, child);
-                        break;
-
-                    case 'IMG':
-                        img = null;
-                        if (typeof media[src] !== 'undefined' && media[src].type.includes('image')) {
-                            // Embed the image into the document.
-                            try {
-                                img = convertAssetToDataURI(media[src]);
-                            } catch(e) {
-                                console.warn(e);
-                            }
-                            if (img !== null) {
-                                child.setAttribute('src', img);
-                            }
-                        }
-                        child.style.cssText = replaceReferences(media, index, child.style.cssText);
-                        break;
-
-                    case 'IFRAME':
-                        if (convertIframes === true && src) {
-                            const id = `<${src.split('cid:')[1]}>`;
-                            const frame = frames[id];
-
-                            if (frame && frame.type === 'text/html') {
-                                const iframe = mhtml2html.convert({
-                                    media: Object.assign({}, media, { [id] : frame }),
-                                    frames: frames,
-                                    index: id,
-                                }, { convertIframes, parseDOM });
-                                child.src = `data:text/html;charset=utf-8,${encodeURIComponent(
-                                    iframe.window.document.documentElement.outerHTML
-                                )}`;
-                            }
-                        }
-                        break;
-
-                    default:
-                        if (child.style) {
-                            child.style.cssText = replaceReferences(media, index, child.style.cssText);
-                        }
-                        break;
-                }
-                nodes.push(child);
-            });
+    // Resolve each node.
+    childNode.childNodes.forEach(function(child) {
+        if (child.getAttribute) {
+            href = child.getAttribute('href');
+            src  = child.getAttribute('src');
         }
-        return dom;
+        if (child.removeAttribute) {
+            child.removeAttribute('integrity');
+        }
+        switch(child.tagName) {
+            case 'HEAD':
+                // Link targets should be directed to the outer frame.
+                base = documentElem.createElement("base");
+                base.setAttribute("target", "_parent");
+                child.insertBefore(base, child.firstChild);
+                break;
+
+            case 'LINK':
+                if (typeof media[href] !== 'undefined' && media[href].type === 'text/css') {
+                    // Embed the css into the document.
+                    style = documentElem.createElement('style');
+                    style.type = 'text/css';
+                    media[href].data = replaceReferences(media, href, media[href].data);
+                    style.appendChild(documentElem.createTextNode(media[href].data));
+                    childNode.replaceChild(style, child);
+                }
+                break;
+
+            case 'STYLE':
+                style = documentElem.createElement('style');
+                style.type = 'text/css';
+                style.appendChild(documentElem.createTextNode(replaceReferences(media, index, child.innerHTML)));
+                childNode.replaceChild(style, child);
+                break;
+
+            case 'IMG':
+                img = null;
+                if (typeof media[src] !== 'undefined' && media[src].type.includes('image')) {
+                    // Embed the image into the document.
+                    try {
+                        img = convertAssetToDataURI(media[src]);
+                    } catch(e) {
+                        console.warn(e);
+                    }
+                    if (img !== null) {
+                        child.setAttribute('src', img);
+                    }
+                }
+                child.style.cssText = replaceReferences(media, index, child.style.cssText);
+                break;
+
+            case 'IFRAME':
+                if (convertIframes === true && src) {
+                    const id = `<${src.split('cid:')[1]}>`;
+                    const frame = frames[id];
+
+                    if (frame && frame.type === 'text/html') {
+                        const iframe = mhtml2html.convert({
+                            media: Object.assign({}, media, { [id] : frame }),
+                            frames: frames,
+                            index: id,
+                        }, { convertIframes, parseDOM });
+                        child.src = `data:text/html;charset=utf-8,${encodeURIComponent(
+                            iframe.window.document.documentElement.outerHTML
+                        )}`;
+                    }
+                }
+                break;
+
+            default:
+                if (child.style) {
+                    child.style.cssText = replaceReferences(media, index, child.style.cssText);
+                }
+                break;
+        }
+        nodes.push(child);
+    });
+}
+return dom;
     }
 };
 

@@ -54,6 +54,25 @@ function absoluteURL(base, relative) {
     return stack.join('/');
 }
 
+// Resolves an asset reference to a media key: exact match first, then
+// relative to the index document (saved files often pair relative
+// src/href with absolute Content-Locations). References carrying a URI
+// scheme (cid:, data:, absolute URLs) are only looked up exactly.
+function resolveMediaKey(media, base, ref) {
+    if (typeof ref !== 'string') {
+        return undefined;
+    }
+    const key = ref.trim();
+    if (typeof media[key] !== 'undefined') {
+        return key;
+    }
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(key)) {
+        return undefined;
+    }
+    const abs = absoluteURL(base, key);
+    return (typeof media[abs] !== 'undefined') ? abs : undefined;
+}
+
 // Converts a string to an ArrayBuffer.
 function stringToArrayBuffer(str) {
     const buf = new ArrayBuffer(str.length);
@@ -74,7 +93,7 @@ function replaceReferences(media, base, asset) {
         reference = asset.substring(i, asset.indexOf(')', i));
 
         // Get the absolute path of the referenced asset.
-        const path = absoluteURL(base, reference.replace(/(\"|\')/g,''));
+        const path = absoluteURL(base, reference.replace(/(\"|\')/g,'').trim());
         if (media[path] != null) {
             if (media[path].type === 'text/css') {
                 media[path].data = replaceReferences(media, base, media[path].data);
@@ -132,8 +151,10 @@ const mhtml2html = {
         let location, encoding, type, id;            // Content properties.
         let state, key, next, index, i, l;           // States.
         let boundary;                                // Boundaries.
+        let boundaryStack = [];                      // Enclosing boundaries for nested multipart.
+        let autoId = 0;                              // Synthetic keys for address-less parts.
 
-        mhtml = mhtml_p.replace("\r\nThis is a multi-part message in MIME format.", ""); // fix for IE-made documents
+        mhtml = mhtml_p;
         headers = { };
         content = { };
         media   = { };
@@ -182,6 +203,24 @@ const mhtml2html = {
             }
         }
 
+        // Consumes lines through the current boundary delimiter. Preamble
+        // content (RFC 2046 5.1.1, e.g. the "multipart message" notice or a
+        // localized IE notice) carries no header field and is ignored; a
+        // header-like line before any boundary means the delimiter is
+        // genuinely missing.
+        function expectBoundary() {
+            trim();
+            for (;;) {
+                const line = getLine();
+                if (line.trim().includes(boundary)) {
+                    return line;
+                }
+                if (/^[A-Za-z0-9-]+:/.test(line.trim())) {
+                    assert(false, `Expected boundary; Line ${l}`);
+                }
+            }
+        }
+
         while (state != MHTML_FSM.MHTML_END) {
             switch(state) {
                 // Fetch document headers including the boundary to use.
@@ -200,10 +239,9 @@ const matches = headers['Content-Type'].match(/boundary=([^;]+)/m);
                         assert(matches != null, `Missing boundary from document headers; Line ${l}`);
                         boundary = matches[1].replace(/\"/g,'');
 
-                        trim();
-                        next = getLine();
-
-assert(next.trim().includes(boundary), `Expected boundary; Line ${l}`);
+                        // Skip any preamble (the "multipart message" notice,
+                        // a localized IE notice, ...) until the first delimiter.
+                        next = expectBoundary();
 content = { };
 state = MHTML_FSM.MTHML_CONTENT;
                     }
@@ -219,22 +257,56 @@ state = MHTML_FSM.MTHML_CONTENT;
                     if (next != 0 && next != '\n') {
                         splitHeaders(next, content);
                     } else {
+                        type = content['Content-Type'];
+
+                        // A nested multipart container carries no payload of its
+                        // own: descend into its inner boundary and parse the
+                        // enclosed parts instead.
+                        if (typeof type !== 'undefined' &&
+                            type.split(';')[0].trim().toLowerCase().startsWith('multipart/')) {
+                            const nested = content['Content-Type'].match(/boundary=([^;]+)/m);
+                            assert(nested != null, `Missing boundary from part headers; Line ${l}`);
+                            boundaryStack.push(boundary);
+                            boundary = nested[1].replace(/\"/g,'');
+                            expectBoundary();
+                            content = { };
+                            break;
+                        }
+
                         encoding = content['Content-Transfer-Encoding'];
-                        type     = content['Content-Type'];
                         id       = content['Content-ID'];
                         location = content['Content-Location'];
 
-                        // Assume the first boundary to be the document.
-                        if (typeof index === 'undefined') {
-                            index = location;
-                            assert(typeof index !== 'undefined' && type.startsWith("text/html"), `Index not found; Line ${l}`);
-                        }
-
                         // Ensure the extracted information exists.
-                        assert(typeof id !== 'undefined' || typeof location !== 'undefined',
-                            `ID or location header not provided;  Line ${l}`);
                         assert(typeof encoding !== 'undefined', `Content-Transfer-Encoding not provided;  Line ${l}`);
                         assert(typeof type     !== 'undefined', `Content-Type not provided; Line ${l}`);
+
+                        // Parts without any address (common in email-saved
+                        // files) still carry content: file them under a
+                        // synthetic key so they stay retrievable.
+                        if (typeof id === 'undefined' && typeof location === 'undefined') {
+                            location = `__mhtml_part_${autoId++}__`;
+                        }
+                        if (typeof location === 'undefined') {
+                            location = id; // ID-only part: address it by its ID.
+                        }
+
+                        // IE/Outlook save stylesheets as application/octet-stream;
+                        // restore the real type from the location's file extension
+                        // so LINK/STYLE embedding serves them with the CSS MIME.
+                        if (type.split(';')[0].trim().toLowerCase() === 'application/octet-stream') {
+                            const ext = location.split('?')[0].split('.').pop().toLowerCase();
+                            if (ext === 'css') {
+                                type = 'text/css';
+                            }
+                        }
+
+                        // The index is the first text/html part, wherever it
+                        // appears (earlier parts may be images or containers).
+                        if (typeof index === 'undefined' &&
+                            type.split(';')[0].trim().toLowerCase() === 'text/html') {
+                            index = location;
+                        }
 
                         asset = {
                             encoding : encoding,
@@ -268,6 +340,19 @@ state = MHTML_FSM.MTHML_CONTENT;
                     while (!next.includes(boundary)) {
                         asset.data += next;
                         next = getLine(encoding);
+                    }
+
+                    // Base64-encoded text payloads are still base64 at this
+                    // point (getLine only trims them): decode to the transfer
+                    // payload before the UTF-8/charset steps below. Binary
+                    // assets stay base64 (data-URI consumers expect it).
+                    if (encoding === 'base64' &&
+                        type.split(';')[0].trim().toLowerCase().startsWith('text/')) {
+                        try {
+                            asset.data = Base64.decode(asset.data.replace(/\s+/g, ''));
+                        } catch (e) {
+                            // Keep the raw payload; the fallback below handles it.
+                        }
                     }
 
                     let decodedData = asset.data; // Store original data for fallback
@@ -357,12 +442,25 @@ state = MHTML_FSM.MTHML_CONTENT;
                         return parseDOM(asset.data);
                     }
 
+                    // A closing delimiter for a nested boundary resumes the
+                    // enclosing multipart (its own delimiter follows next),
+                    // or ends the document if nothing follows.
+                    if (next.includes(boundary + '--') && boundaryStack.length) {
+                        boundary = boundaryStack.pop();
+                        content = { };
+                        expectBoundary();
+                        state = (i >= mhtml.length - 1 ? MHTML_FSM.MHTML_END : MHTML_FSM.MTHML_CONTENT);
+                        break;
+                    }
+
                     // Set the finishing state if there are no more characters.
                     state = (i >= mhtml.length - 1 ? MHTML_FSM.MHTML_END : MHTML_FSM.MTHML_CONTENT);
                     break;
                 }
             }
         }
+
+        assert(typeof index !== 'undefined', `Index not found; Line ${l}`);
 
         return {
             frames: frames,
@@ -384,6 +482,7 @@ state = MHTML_FSM.MTHML_CONTENT;
         let index, media, frames;  // Record-keeping.
         let style, base, img;      // DOM objects.
         let href, src;             // References.
+        let cssKey, imgKey;        // Resolved media keys.
 
         if (typeof mhtml === "string") {
             mhtml = mhtml2html.parse(mhtml);
@@ -440,12 +539,13 @@ while (nodes.length) {
                 break;
 
             case 'LINK':
-                if (typeof media[href] !== 'undefined' && media[href].type === 'text/css') {
+                cssKey = resolveMediaKey(media, index, href);
+                if (typeof cssKey !== 'undefined' && media[cssKey].type === 'text/css') {
                     // Embed the css into the document.
                     style = documentElem.createElement('style');
                     style.type = 'text/css';
-                    media[href].data = replaceReferences(media, href, media[href].data);
-                    style.appendChild(documentElem.createTextNode(media[href].data));
+                    media[cssKey].data = replaceReferences(media, cssKey, media[cssKey].data);
+                    style.appendChild(documentElem.createTextNode(media[cssKey].data));
                     childNode.replaceChild(style, child);
                 }
                 break;
@@ -459,10 +559,11 @@ while (nodes.length) {
 
             case 'IMG':
                 img = null;
-                if (typeof media[src] !== 'undefined' && media[src].type.includes('image')) {
+                imgKey = resolveMediaKey(media, index, src);
+                if (typeof imgKey !== 'undefined' && media[imgKey].type.includes('image')) {
                     // Embed the image into the document.
                     try {
-                        img = convertAssetToDataURI(media[src]);
+                        img = convertAssetToDataURI(media[imgKey]);
                     } catch(e) {
                         console.warn(e);
                     }

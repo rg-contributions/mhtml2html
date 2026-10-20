@@ -84,7 +84,9 @@ describe('Test parsing MHTML', function () {
 
     it('Should raise an exception for invalid MHTML (Missing Headers)', function(done) {
         readMHTML('missing_headers.mhtml', (data) => {
-            chai.expect(() => { mhtml2html.parse(data, { parseDOM }); }).to.throw('ID or location header not provided;  Line 26');
+            // Address-less parts are filed under synthetic keys, so this
+            // truncated file now fails at EOF instead of at the part headers.
+            chai.expect(() => { mhtml2html.parse(data, { parseDOM }); }).to.throw('Unexpected EOF');
             done();
         });
     });
@@ -98,7 +100,8 @@ describe('Test parsing MHTML', function () {
 
     it('Should raise an exception for invalid MHTML (Missing Asset Boundary)', function(done) {
         readMHTML('missing_boundary.mhtml', (data) => {
-            chai.expect(() => { mhtml2html.parse(data, { parseDOM }); }).to.throw('Expected boundary; Line 9');
+            // NB: Line 10, not 9 — trim() counts the \r\n blank line.
+            chai.expect(() => { mhtml2html.parse(data, { parseDOM }); }).to.throw('Expected boundary; Line 10');
             done();
         });
     });
@@ -172,6 +175,164 @@ describe('Test converting MHTML to HTML', function () {
 
     it('Should raise an exception for invalid MHTML object', function(done) {
         chai.expect(() => { mhtml2html.convert({ }, { parseDOM }); }).to.throw('MHTML error: invalid frames');
+        done();
+    });
+
+    it('Should decode base64 text/html parts', function(done) {
+        // <h1>Hello</h1> as base64; previously left as base64 text.
+        const data = 'MIME-Version: 1.0\n' +
+            'Content-Type: multipart/related; boundary="b1"\n' +
+            '\n' +
+            '--b1\n' +
+            'Content-Type: text/html\n' +
+            'Content-Transfer-Encoding: base64\n' +
+            'Content-Location: http://example.com/\n' +
+            '\n' +
+            'PGgxPkhlbGxvPC9oMT4=\n' +
+            '--b1--\n';
+        const doc = mhtml2html.parse(data, { parseDOM });
+        chai.expect(doc.index).to.equal('http://example.com/');
+        chai.expect(doc.media['http://example.com/'].data).to.equal('<h1>Hello</h1>');
+        done();
+    });
+
+    it('Should skip preamble before the first boundary', function(done) {
+        const data = 'MIME-Version: 1.0\n' +
+            'Content-Type: multipart/related; boundary="b2"\n' +
+            '\n' +
+            'This is a multipart message in MIME format.\n' +
+            '\n' +
+            '--b2\n' +
+            'Content-Type: text/html\n' +
+            'Content-Transfer-Encoding: quoted-printable\n' +
+            'Content-Location: http://example.com/\n' +
+            '\n' +
+            'Hello=20World\n' +
+            '--b2--\n';
+        const doc = mhtml2html.parse(data, { parseDOM });
+        chai.expect(doc.index).to.equal('http://example.com/');
+        chai.expect(doc.media['http://example.com/'].data).to.equal('Hello World\n');
+        done();
+    });
+
+    it('Should descend into nested multipart and pick the first text/html', function(done) {
+        const data = 'MIME-Version: 1.0\n' +
+            'Content-Type: multipart/related; boundary="outer"\n' +
+            '\n' +
+            '--outer\n' +
+            'Content-Type: image/gif\n' +
+            'Content-Transfer-Encoding: base64\n' +
+            'Content-Location: http://example.com/a.gif\n' +
+            '\n' +
+            'R0lGODlhAQABAIAAAP8AAAAA\n' +
+            '\n' +
+            '--outer\n' +
+            'Content-Type: multipart/alternative;\n' +
+            '\tboundary="inner"\n' +
+            '\n' +
+            '--inner\n' +
+            'Content-Type: text/html\n' +
+            'Content-Transfer-Encoding: quoted-printable\n' +
+            'Content-Location: http://example.com/\n' +
+            '\n' +
+            'Nested=20OK\n' +
+            '--inner--\n' +
+            '\n' +
+            '--outer\n' +
+            'Content-Type: text/css\n' +
+            'Content-Transfer-Encoding: quoted-printable\n' +
+            'Content-Location: http://example.com/a.css\n' +
+            '\n' +
+            'a { color: red; }\n' +
+            '--outer--\n';
+        const doc = mhtml2html.parse(data, { parseDOM });
+        chai.expect(doc.index).to.equal('http://example.com/');
+        chai.expect(doc.media['http://example.com/'].data).to.equal('Nested OK\n');
+        // Binary payloads stay base64 for data-URI consumers.
+        chai.expect(doc.media['http://example.com/a.gif'].data).to.equal('R0lGODlhAQABAIAAAP8AAAAA');
+        chai.expect(doc.media).to.have.property('http://example.com/a.css');
+        done();
+    });
+
+    it('Should resolve relative img src against absolute Content-Location', function(done) {
+        const data = 'MIME-Version: 1.0\n' +
+            'Content-Type: multipart/related; boundary="b5"\n' +
+            '\n' +
+            '--b5\n' +
+            'Content-Type: text/html\n' +
+            'Content-Transfer-Encoding: quoted-printable\n' +
+            'Content-Location: file:///C:/doc/page.htm\n' +
+            '\n' +
+            '<html><body><img src="files/a.png"></body></html>\n' +
+            '--b5\n' +
+            'Content-Type: image/png\n' +
+            'Content-Transfer-Encoding: base64\n' +
+            'Content-Location: file:///C:/doc/files/a.png\n' +
+            '\n' +
+            'iVBORw0KGgo=\n' +
+            '--b5--\n';
+        const doc = mhtml2html.convert(data, { parseDOM });
+        const img = doc.window.document.querySelector('img');
+        chai.expect(img.getAttribute('src').startsWith('data:image/png;base64,')).to.be.true;
+        done();
+    });
+
+    it('Should apply octet-stream stylesheets and spaced url() references', function(done) {
+        const data = 'MIME-Version: 1.0\n' +
+            'Content-Type: multipart/related; boundary="b6"\n' +
+            '\n' +
+            '--b6\n' +
+            'Content-Type: text/html\n' +
+            'Content-Transfer-Encoding: quoted-printable\n' +
+            'Content-Location: http://example.com/page\n' +
+            '\n' +
+            '<html><head><link rel="stylesheet" href="style.css">' +
+            '<style>@import url( theme.css );</style></head><body>Hi</body></html>\n' +
+            '--b6\n' +
+            'Content-Type: application/octet-stream\n' +
+            'Content-Transfer-Encoding: base64\n' +
+            'Content-Location: http://example.com/style.css\n' +
+            '\n' +
+            'Ym9keSB7IGNvbG9yOiByZWQ7IH0=\n' +
+            '--b6\n' +
+            'Content-Type: application/octet-stream\n' +
+            'Content-Transfer-Encoding: base64\n' +
+            'Content-Location: http://example.com/theme.css\n' +
+            '\n' +
+            'cCB7IG1hcmdpbjogMDsgfQ==\n' +
+            '--b6--\n';
+        const parsed = mhtml2html.parse(data, { parseDOM });
+        chai.expect(parsed.media['http://example.com/style.css'].type).to.equal('text/css');
+        const doc = mhtml2html.convert(data, { parseDOM });
+        chai.expect(doc.window.document.querySelectorAll('link').length).to.equal(0);
+        const css = [...doc.window.document.querySelectorAll('style')]
+            .map(s => s.textContent).join('\n');
+        chai.expect(css).to.contain('color: red');
+        chai.expect(css).to.contain('data:text/css;base64,');
+        done();
+    });
+
+    it('Should file address-less parts (email style) under synthetic keys', function(done) {
+        const data = 'MIME-Version: 1.0\n' +
+            'Content-Type: multipart/alternative; boundary="b4"\n' +
+            '\n' +
+            '--b4\n' +
+            'Content-Type: text/plain;\n' +
+            '\tcharset="UTF-8"\n' +
+            'Content-Transfer-Encoding: 8bit\n' +
+            '\n' +
+            'plain text here\n' +
+            '\n' +
+            '--b4\n' +
+            'Content-Type: text/html;\n' +
+            '\tcharset="UTF-8"\n' +
+            'Content-Transfer-Encoding: quoted-printable\n' +
+            '\n' +
+            '<html><body>Hi</body></html>\n' +
+            '--b4--\n';
+        const doc = mhtml2html.parse(data, { parseDOM });
+        chai.expect(doc.index).to.match(/^__mhtml_part_/);
+        chai.expect(doc.media[doc.index].data).to.contain('Hi');
         done();
     });
 

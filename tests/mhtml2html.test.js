@@ -196,6 +196,25 @@ describe('Test converting MHTML to HTML', function () {
         done();
     });
 
+    it('Should decode base64 text/html via the part-header charset fallback', function(done) {
+        // '<p>Привет</p>' in windows-1251: not valid UTF-8, so the fast
+        // path throws and the part-header charset must take over.
+        const data = 'MIME-Version: 1.0\n' +
+            'Content-Type: multipart/related; boundary="b7"\n' +
+            '\n' +
+            '--b7\n' +
+            'Content-Type: text/html;\n' +
+            '\tcharset="windows-1251"\n' +
+            'Content-Transfer-Encoding: base64\n' +
+            'Content-Location: http://example.com/\n' +
+            '\n' +
+            'PHA+z/Do4uXyPC9wPg==\n' +
+            '--b7--\n';
+        const doc = mhtml2html.parse(data, { parseDOM });
+        chai.expect(doc.media['http://example.com/'].data).to.equal('<p>Привет</p>');
+        done();
+    });
+
     it('Should skip preamble before the first boundary', function(done) {
         const data = 'MIME-Version: 1.0\n' +
             'Content-Type: multipart/related; boundary="b2"\n' +
